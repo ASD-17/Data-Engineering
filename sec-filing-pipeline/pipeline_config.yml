@@ -1,0 +1,47 @@
+kafka:
+  bootstrap_servers: "localhost:9092"
+  topic: "sec-filings-raw"
+  partitions: 3
+  retention_ms: 604800000  # 7 days
+
+edgar:
+  base_url: "https://efts.sec.gov/LATEST/search-index"
+  poll_interval_seconds: 30
+  filing_types:
+    - "10-K"
+    - "10-Q"
+    - "8-K"
+  state_file: "src/ingestion/state/last_check_timestamp.txt"
+
+spark:
+  app_name: "sec-filing-pipeline"
+  trigger_interval: "30 seconds"
+  bronze_checkpoint: "checkpoints/bronze"
+  silver_checkpoint: "checkpoints/silver"
+
+azure:
+  storage_account: ""        # set in .env
+  container_name: "sec-data"
+  delta_base_path: "abfss://sec-data@{storage_account}.dfs.core.windows.net"
+
+delta:
+  bronze_table: "bronze.sec_filings_raw"
+  silver_table: "silver.sec_filings_parsed"
+  gold_table: "gold.sec_filings_enriched"
+  summary_table: "gold.company_sentiment_summary"
+  quarantine_table: "silver.sec_filings_quarantine"
+
+enrichment:
+  finbert_model: "ProsusAI/finbert"
+  batch_size: 16
+  use_gpu: true
+  max_token_length: 512
+  sentiment_window_days: 90
+
+anomaly:
+  quarantine_alert_threshold: 0.05
+  sentiment_drop_threshold: -0.40
+  severity_thresholds:
+    critical_flag_count: 3
+    high_delta_threshold: -0.40
+    medium_delta_threshold: -0.20
