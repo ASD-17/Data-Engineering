@@ -93,10 +93,10 @@ def fetch_new_filings(since_timestamp: str) -> list[dict]:
     """
     forms_param = ",".join(FILING_TYPES)
     params = {
-        "q":         '""',
+        "q":         "annual report",
         "dateRange": "custom",
-        "startdt":   since_timestamp,
-        "enddt":     datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S"),
+        "startdt":   since_timestamp[:10],
+        "enddt":     datetime.now(timezone.utc).strftime("%Y-%m-%d"),
         "forms":     forms_param,
     }
 
@@ -135,16 +135,49 @@ def build_kafka_event(hit: dict) -> dict:
     """
     source = hit.get("_source", {})
 
+    # The EDGAR full text search API returns these fields
+    # We inspect the raw hit to extract correct values
+    
+    # Company name from display_names list
+    display_names = source.get("display_names", [])
+    company_name = display_names[0] if display_names else source.get("entity_name", "")
+    
+    # CIK from file_num or ciks list  
+    file_num_raw = source.get("file_num", "")
+    file_num = file_num_raw[0] if isinstance(file_num_raw, list) else file_num_raw
+    
+    # Filing type from root_forms list or form field
+    root_forms = source.get("root_forms", [])
+    filing_type = root_forms[0] if root_forms else source.get("form_type", "")
+    
+    # Filed date
+    filed_date = source.get("file_date", "")
+    
+    # Accession number for URL
+    adsh = source.get("adsh", "")
+    file_id = hit.get("_id", "")
+    
+    # Build filing URL from file_id which looks like "accession:filename"
+    filing_url = ""
+    if file_id and ":" in file_id:
+        accession = file_id.split(":")[0]
+        filename = file_id.split(":")[1]
+        # Extract numeric CIK from file_num
+        cik_num = file_num.replace("-", "").lstrip("0") if file_num else ""
+        if cik_num:
+            accession_clean = accession.replace("-", "")
+            filing_url = f"https://www.sec.gov/Archives/edgar/data/{cik_num}/{accession_clean}/{filename}"
+
     return {
         "ingestion_id":        str(uuid.uuid4()),
         "ingestion_timestamp": datetime.now(timezone.utc).isoformat(),
-        "company_name":        source.get("entity_name", ""),
-        "ticker":              source.get("ticker_symbol", ""),
-        "cik":                 source.get("file_num", ""),
-        "filing_type":         source.get("form_type", ""),
-        "filed_date":          source.get("file_date", ""),
+        "company_name":        company_name,
+        "ticker":              source.get("ticker", ""),
+        "cik":                 file_num,
+        "filing_type":         filing_type,
+        "filed_date":          filed_date,
         "period_of_report":    source.get("period_of_report", ""),
-        "filing_url":          source.get("file_date", ""),
+        "filing_url":          filing_url,
         "source":              "edgar_api",
     }
 

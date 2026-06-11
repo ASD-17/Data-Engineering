@@ -89,7 +89,7 @@ def create_spark_session() -> SparkSession:
     streaming sources to be recognized correctly.
     """
     os.environ["PYSPARK_SUBMIT_ARGS"] = (
-        "--packages org.apache.spark:spark-sql-kafka-0-10_2.13:4.1.0 "
+        "--packages org.apache.spark:spark-sql-kafka-0-10_2.13:4.1.0,io.delta:delta-spark_2.13:4.2.0 "
         "pyspark-shell"
     )
 
