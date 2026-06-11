@@ -1,0 +1,5 @@
+src/streaming/bronze.sec_filings_raw/
+src/streaming/silver.sec_filings_parsed/
+src/streaming/silver.sec_filings_quarantine/
+src/streaming/checkpoints/
+src/ingestion/state/
