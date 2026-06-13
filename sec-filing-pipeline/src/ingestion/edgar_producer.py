@@ -31,6 +31,7 @@ EDGAR_BASE_URL          = config["edgar"]["base_url"]
 POLL_INTERVAL           = config["edgar"]["poll_interval_seconds"]
 FILING_TYPES            = config["edgar"]["filing_types"]
 STATE_FILE              = Path(__file__).parent / "state" / "last_check_timestamp.txt"
+USER_AGENT              = "AgasyaDevarasetty asrkgd@gmail.com"
 
 # ─────────────────────────────────────────
 # Kafka delivery callback
@@ -124,56 +125,110 @@ def fetch_new_filings(since_timestamp: str) -> list[dict]:
 # clean Kafka event payload
 # ─────────────────────────────────────────
 
+def get_filing_details(cik_numeric: str, accession_clean: str) -> dict:
+    """
+    Fetch company name and primary document filename from the EDGAR
+    submissions API. This is the authoritative source for both fields.
+
+    The submissions API URL format:
+    https://data.sec.gov/submissions/CIK0000320193.json
+
+    CIK must be zero-padded to 10 digits.
+    We look through recent filings to find the matching accession number
+    and return the primary document filename and company name.
+    """
+    try:
+        cik_padded = cik_numeric.zfill(10)
+        url = f"https://data.sec.gov/submissions/CIK{cik_padded}.json"
+        headers = {"User-Agent": USER_AGENT}
+        r = requests.get(url, headers=headers, timeout=10)
+        if r.status_code != 200:
+            return {}
+        data = r.json()
+        company_name = data.get("name", "")
+        ticker = ""
+        tickers = data.get("tickers", [])
+        if tickers:
+            ticker = tickers[0]
+
+        # Find primary document for this accession number
+        recent = data.get("filings", {}).get("recent", {})
+        accession_numbers = recent.get("accessionNumber", [])
+        primary_docs = recent.get("primaryDocument", [])
+
+        primary_doc = ""
+        for i, acc in enumerate(accession_numbers):
+            acc_clean = acc.replace("-", "")
+            if acc_clean == accession_clean:
+                if i < len(primary_docs):
+                    primary_doc = primary_docs[i]
+                break
+
+        return {
+            "company_name": company_name,
+            "ticker": ticker,
+            "primary_doc": primary_doc
+        }
+    except Exception as e:
+        logger.warning(f"Could not fetch submissions for CIK {cik_numeric}: {e}")
+        return {}
+
+
 def build_kafka_event(hit: dict) -> dict:
     """
     Extract the fields we need from one EDGAR API result
     and build a structured Kafka event.
 
+    Uses the EDGAR submissions API to get the authoritative
+    company name, ticker, and primary document filename.
     The ingestion_id is a UUID generated here so every event
     has a unique, traceable identifier from the moment it enters
     the pipeline.
     """
     source = hit.get("_source", {})
+    file_id = hit.get("_id", "")
 
-    # The EDGAR full text search API returns these fields
-    # We inspect the raw hit to extract correct values
-    
-    # Company name from display_names list
-    display_names = source.get("display_names", [])
-    company_name = display_names[0] if display_names else source.get("entity_name", "")
-    
-    # CIK from file_num or ciks list  
-    file_num_raw = source.get("file_num", "")
-    file_num = file_num_raw[0] if isinstance(file_num_raw, list) else file_num_raw
-    
-    # Filing type from root_forms list or form field
+    # Filing type from root_forms list
     root_forms = source.get("root_forms", [])
     filing_type = root_forms[0] if root_forms else source.get("form_type", "")
-    
+
     # Filed date
     filed_date = source.get("file_date", "")
-    
-    # Accession number for URL
-    adsh = source.get("adsh", "")
-    file_id = hit.get("_id", "")
-    
-    # Build filing URL from file_id which looks like "accession:filename"
+
+    # Extract accession number and CIK from _id field
+    # _id looks like "0001651308-26-000017:bgne-20260611.htm"
     filing_url = ""
+    cik_numeric = ""
+    company_name = ""
+    ticker = ""
+
     if file_id and ":" in file_id:
         accession = file_id.split(":")[0]
-        filename = file_id.split(":")[1]
-        # Extract numeric CIK from file_num
-        cik_num = file_num.replace("-", "").lstrip("0") if file_num else ""
-        if cik_num:
-            accession_clean = accession.replace("-", "")
-            filing_url = f"https://www.sec.gov/Archives/edgar/data/{cik_num}/{accession_clean}/{filename}"
+        accession_clean = accession.replace("-", "")
+        # First 10 digits of accession number = filer CIK
+        cik_numeric = str(int(accession_clean[:10])) if accession_clean else ""
+
+        # Get company name, ticker, and primary doc from submissions API
+        # Small delay to respect SEC rate limits (10 requests/second max)
+        time.sleep(0.15)
+        details = get_filing_details(cik_numeric, accession_clean)
+        company_name = details.get("company_name", "")
+        ticker = details.get("ticker", "")
+        primary_doc = details.get("primary_doc", "")
+
+        # Build URL using primary document filename from submissions API
+        if primary_doc and cik_numeric:
+            filing_url = f"https://www.sec.gov/Archives/edgar/data/{cik_numeric}/{accession_clean}/{primary_doc}"
+        elif cik_numeric:
+            # Fallback to index page which always exists
+            filing_url = f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={cik_numeric}&type={filing_type}&dateb=&owner=include&count=1"
 
     return {
         "ingestion_id":        str(uuid.uuid4()),
         "ingestion_timestamp": datetime.now(timezone.utc).isoformat(),
         "company_name":        company_name,
-        "ticker":              source.get("ticker", ""),
-        "cik":                 file_num,
+        "ticker":              ticker,
+        "cik":                 cik_numeric,
         "filing_type":         filing_type,
         "filed_date":          filed_date,
         "period_of_report":    source.get("period_of_report", ""),
