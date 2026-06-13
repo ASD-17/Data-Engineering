@@ -3,3 +3,7 @@ src/streaming/silver.sec_filings_parsed/
 src/streaming/silver.sec_filings_quarantine/
 src/streaming/checkpoints/
 src/ingestion/state/
+src/streaming/gold.sec_filings_enriched/
+src/streaming/gold.company_sentiment_summary/
+src/__pycache__/
+src/ingestion/__pycache__/
