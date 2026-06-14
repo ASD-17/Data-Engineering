@@ -1,21 +1,8 @@
 # SEC Filing Intelligence Pipeline
 
-A real-time data pipeline that ingests SEC EDGAR filings the moment they are
-published, scores them for financial sentiment using FinBERT, detects anomalies,
-and surfaces compliance alerts on a Databricks dashboard within 60 seconds.
+A production-grade real-time data engineering pipeline that ingests SEC EDGAR filings, processes them through a Medallion Architecture, and enriches them with FinBERT NLP sentiment analysis and anomaly detection. Built to give compliance analysts and financial researchers actionable intelligence on public company disclosures within minutes of filing.
 
-Built on Apache Kafka, Spark Structured Streaming, Delta Lake on Azure, and
-Databricks. All data is real, free, and sourced from the US government.
-
----
-
-## What It Does
-
-Every public company in the US is legally required to report significant events
-to the SEC. When a CEO resigns, a merger is announced, or earnings are restated,
-that filing goes live on EDGAR within minutes. This pipeline captures that event,
-extracts meaning from the unstructured legal text, and flags anything unusual
-before a human analyst would have finished reading the first paragraph.
+**Status: Live on Azure Databricks**
 
 ---
 
@@ -24,32 +11,46 @@ before a human analyst would have finished reading the first paragraph.
 ```
 SEC EDGAR API
      |
-     | new filing published
      v
-Kafka Producer (Python)
-     |
-     | event to sec-filings-raw topic
-     v
-Kafka (3 partitions, 7-day retention)
-     |
-     | consumed every 30 seconds
-     v
-Spark Structured Streaming
+edgar_producer.py
+(Python + Confluent Kafka)
      |
      v
-Delta Lake Bronze       raw XML, append-only, permanent record
+Apache Kafka
+sec-filings-raw topic
+3 partitions
      |
      v
-Delta Lake Silver       parsed, cleaned, structured
+bronze_writer.py
+(Spark Structured Streaming + foreachBatch)
      |
      v
-FinBERT NLP + Anomaly Detection
+Bronze Layer
+sec_pipeline_catalog.bronze.sec_filings_raw
+Delta Lake on ADLS Gen2
      |
      v
-Delta Lake Gold         sentiment scores, anomaly flags, alerts
+silver_transformer.py
+(PySpark batch + schema validation + quarantine)
      |
      v
-Databricks Dashboard    compliance analyst sees alert in under 60 seconds
+Silver Layer
+sec_pipeline_catalog.silver.sec_filings_parsed
+Delta Lake on ADLS Gen2
+     |
+     v
+gold_enricher.py
+(FinBERT NLP + rule-based anomaly detection)
+     |
+     v
+Gold Layer
+sec_pipeline_catalog.gold.sec_filings_enriched
+sec_pipeline_catalog.gold.company_sentiment_summary
+Delta Lake on ADLS Gen2
+     |
+     v
+Databricks SQL Dashboard
+6 analytical queries for compliance teams
 ```
 
 ---
@@ -57,152 +58,108 @@ Databricks Dashboard    compliance analyst sees alert in under 60 seconds
 ## Tech Stack
 
 | Layer | Technology |
-|-------|-----------|
-| Ingestion | Python, SEC EDGAR API, Apache Kafka |
-| Streaming | Apache Spark Structured Streaming |
-| NLP | FinBERT (ProsusAI/finbert) |
+|---|---|
+| Ingestion | Python, Confluent Kafka, SEC EDGAR API |
+| Streaming | Apache Spark Structured Streaming, foreachBatch |
 | Storage | Delta Lake, Azure Data Lake Storage Gen2 |
-| Orchestration | Databricks Workflows |
-| Visualization | Databricks SQL Dashboard |
+| Processing | PySpark, Spark SQL |
+| NLP | FinBERT (ProsusAI/finbert) via HuggingFace Inference API |
+| Cloud | Azure Databricks, ADLS Gen2, Access Connector |
+| Governance | Unity Catalog, External Location, Storage Credential |
+| Orchestration | Manual batch (Airflow integration planned) |
 
 ---
 
-## Filing Types Supported
+## Pipeline Layers
 
-| Filing | Description | Version |
-|--------|-------------|---------|
-| 8-K | Breaking news — CEO change, merger, restatement | V1 |
-| 10-K | Annual financial report | V1 |
-| 10-Q | Quarterly financial report | V1 |
-| S-1 | IPO filing | V2 planned |
-| DEF 14A | Proxy statement | V2 planned |
+**Bronze** — Raw ingestion layer. Consumes JSON events from Kafka via Spark Structured Streaming and writes them as Delta Lake Parquet files. Stores raw filing metadata and document text exactly as received. No transformations applied.
+
+**Silver** — Validated and structured layer. Reads Bronze records, applies schema validation, parses filing metadata, computes word count and document flags, and routes invalid records to a quarantine table. Only records with valid filing type and date proceed.
+
+**Gold** — Business-ready enrichment layer. Runs each filing through FinBERT for financial sentiment scoring (positive, negative, neutral with confidence score 0 to 1). Applies rule-based anomaly detection for going concern language, earnings restatements, CEO departures, legal proceedings, and unusual trading activity. Assigns alert severity and writes to the enriched table and company sentiment summary.
 
 ---
 
-## Anomaly Detection Flags
+## Results
 
-The pipeline checks every filing against six anomaly conditions:
+Validated against 100 real SEC filings from June 2026:
+
+- 100 records processed end to end with zero pipeline errors
+- 12 anomaly alerts triggered on real filings
+- Flagstar Bank (FLG) flagged for sudden CEO change
+- Repay Holdings (RPAY) flagged for earnings restatement language
+- BeOne Medicines (ONC) flagged for earnings restatement language
+- FinBERT sentiment scores ranging from 0.92 to 0.95 confidence
+
+---
+
+## Cloud Infrastructure
 
 ```
-sudden_ceo_change          CEO or CFO named in resignation context
-earnings_restatement       Prior earnings being corrected
-going_concern              Auditor questioning business continuity
-legal_proceedings          Significant new litigation disclosed
-sentiment_drop             Sentiment 40% below company 90-day average
-options_volume_spike       Unusual options activity in 48 hours before filing
+Resource Group       sec-pipeline-rg          East US
+Storage Account      secpipelinestorage        ADLS Gen2, LRS
+Container            sec-data
+Access Connector     sec_pipeline_access_connector
+Databricks Workspace sec-pipeline-databricks   Premium Trial
+Storage Credential   sec_pipeline_credential   Managed Identity
+External Location    sec_pipeline_external     abfss://sec-data@secpipelinestorage
+Unity Catalog        sec_pipeline_catalog
+Schemas              bronze, silver, gold
 ```
-
-Alert severity is assigned as critical, high, medium, or low based on
-the number and type of flags triggered.
 
 ---
 
-## Project Structure
+## Repository Structure
 
 ```
 sec-filing-pipeline/
-    src/
-        ingestion/
-            edgar_producer.py       Kafka producer, polls EDGAR API
-        streaming/
-            bronze_writer.py        Spark job, Kafka to Bronze Delta
-        processing/
-            silver_transformer.py   Spark job, Bronze to Silver
-        enrichment/
-            gold_enricher.py        FinBERT scoring + anomaly detection
-        dashboard/
-            queries.sql             Databricks SQL dashboard queries
-    infrastructure/
-        kafka/
-            docker-compose.yml      Local Kafka setup
-    config/
-        pipeline_config.yml         All configuration in one place
-    docs/
-        business_problem.md         Why this pipeline exists
-        solution_architecture.md    How it is built and why
-        data_model.md               Bronze, Silver, Gold schemas
-        pipeline_flow.md            Step by step data flow
-        runbook.md                  How to operate in production
-    tests/
-        unit/
-        integration/
-    requirements.txt
-    .gitignore
+  docs/
+    business_problem.md
+    solution_architecture.md
+    data_model.md
+    pipeline_flow.md
+    runbook.md
+  config/
+    pipeline_config.yml
+  src/
+    ingestion/
+      edgar_producer.py
+    streaming/
+      bronze_writer.py
+    processing/
+      silver_transformer.py
+    enrichment/
+      gold_enricher.py
+    dashboard/
+      queries.sql
+  infrastructure/
+    kafka/
+      docker-compose.yml
+  requirements.txt
+  .gitignore
 ```
 
 ---
 
-## Getting Started
+## Local Setup
 
-Clone the repo:
-
-```bash
-git clone https://github.com/ASD-17/sec-filing-pipeline.git
-cd sec-filing-pipeline
-```
-
-Install dependencies:
+Requires Java 17, Python 3.12, Docker Desktop.
 
 ```bash
-pip install -r requirements.txt
+# Start Kafka
+cd infrastructure/kafka && docker-compose up -d
+
+# Run pipeline in order
+python3 src/ingestion/edgar_producer.py
+python3 src/streaming/bronze_writer.py
+python3 src/processing/silver_transformer.py
+export HUGGINGFACE_TOKEN="your_token"
+python3 src/enrichment/gold_enricher.py
 ```
-
-Set up environment variables:
-
-```bash
-cp .env.example .env
-# Edit .env with your Azure storage credentials
-```
-
-Start Kafka locally:
-
-```bash
-cd infrastructure/kafka
-docker-compose up -d
-```
-
-Start the EDGAR producer:
-
-```bash
-cd src/ingestion
-python edgar_producer.py
-```
-
-See the full setup guide in [docs/runbook.md](docs/runbook.md).
 
 ---
 
-## Documentation
+## Author
 
-| Document | Description |
-|----------|-------------|
-| [Business Problem](docs/business_problem.md) | Why this pipeline exists |
-| [Solution Architecture](docs/solution_architecture.md) | Design decisions and technology choices |
-| [Data Model](docs/data_model.md) | Complete Bronze, Silver, Gold schemas |
-| [Pipeline Flow](docs/pipeline_flow.md) | Step by step walkthrough of the full pipeline |
-| [Runbook](docs/runbook.md) | How to start, stop, monitor, and troubleshoot |
-
----
-
-## Data Source
-
-All data is sourced from the SEC EDGAR Full Text Search API at
-https://efts.sec.gov/LATEST/search-index. No API key required. Free,
-real, and government maintained. These are the same filings that analysts
-at hedge funds and investment banks read every day.
-
----
-
-## Status
-
-Pipeline is under active development. Documentation is complete.
-Code implementation in progress.
-
-| Component | Status |
-|-----------|--------|
-| Docs | Complete |
-| Kafka Producer | In progress |
-| Bronze Writer | In progress |
-| Silver Transformer | Planned |
-| Gold Enricher | Planned |
-| Dashboard | Planned |
+Agasya Sandilya Devarasetty
+Data Engineer 
