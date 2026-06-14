@@ -20,6 +20,16 @@ This document covers how to run the SEC Filing Intelligence Pipeline in both loc
 pip3 install -r requirements.txt
 ```
 
+
+### Run unit tests
+
+```bash
+cd sec-filing-pipeline
+pytest tests/test_pipeline.py -v
+```
+
+All 23 tests should pass in under 2 seconds. Tests use mocking for external API calls so no network connection or HuggingFace token is required.
+
 ### Start Kafka
 
 ```bash

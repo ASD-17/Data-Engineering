@@ -159,7 +159,33 @@ python3 src/enrichment/gold_enricher.py
 
 ---
 
+## Testing
+
+The pipeline includes 23 unit tests covering the three most critical functions.
+
+```
+tests/
+  __init__.py
+  test_pipeline.py
+```
+
+Test coverage:
+
+- `TestDetectAnomalies` — 9 tests verifying anomaly flag detection for going concern, earnings restatements, CEO changes, legal proceedings, and edge cases
+- `TestScoreSentimentApi` — 7 tests verifying FinBERT API handling including success, 503 fallback, exception fallback, and empty text
+- `TestBuildKafkaEvent` — 7 tests verifying EDGAR field extraction, URL construction, and UUID generation
+
+Run tests:
+
+```bash
+cd sec-filing-pipeline
+pytest tests/test_pipeline.py -v
+```
+
+Expected output: 23 passed in under 2 seconds.
+
+---
+
 ## Author
 
-Agasya Sandilya Devarasetty
-Data Engineer 
+Agasya Sandilya Devarasetty | Data Engineer 
