@@ -10,3 +10,6 @@ src/ingestion/__pycache__/
 tests/__pycache__/
 **/__pycache__/
 **/*.pyc
+.pytest_cache/
+src/ingestion/state/
+.DS_Store
