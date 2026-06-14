@@ -7,3 +7,6 @@ src/streaming/gold.sec_filings_enriched/
 src/streaming/gold.company_sentiment_summary/
 src/__pycache__/
 src/ingestion/__pycache__/
+tests/__pycache__/
+**/__pycache__/
+**/*.pyc
