@@ -23,7 +23,7 @@ SELECT
     anomaly_count,
     alert_severity,
     enrichment_timestamp
-FROM gold.sec_filings_enriched
+FROM sec_pipeline_catalog.gold.sec_filings_enriched
 ORDER BY enrichment_timestamp DESC
 LIMIT 50;
 
@@ -45,7 +45,7 @@ SELECT
     anomaly_count,
     sentiment_label,
     ROUND(sentiment_score, 4)   AS sentiment_score
-FROM gold.sec_filings_enriched
+FROM sec_pipeline_catalog.gold.sec_filings_enriched
 WHERE alert_triggered = TRUE
 ORDER BY
     CASE alert_severity
@@ -70,15 +70,15 @@ SELECT
     ticker,
     filed_date,
     sentiment_label,
-    ROUND(sentiment_score, 4)       AS sentiment_score,
+    ROUND(sentiment_score, 4)                                       AS sentiment_score,
     ROUND(AVG(sentiment_score) OVER (
         PARTITION BY ticker
         ORDER BY filed_date
         ROWS BETWEEN 6 PRECEDING AND CURRENT ROW
-    ), 4)                         AS rolling_7day_avg_sentiment,
+    ), 4)                                                           AS rolling_7day_avg_sentiment,
     anomaly_count,
     alert_severity
-FROM gold.sec_filings_enriched
+FROM sec_pipeline_catalog.gold.sec_filings_enriched
 WHERE filed_date >= DATE_SUB(CURRENT_DATE(), 90)
     AND ticker IS NOT NULL
     AND ticker != ''
@@ -101,7 +101,7 @@ SELECT
     )                                       AS total_filings_that_day,
     ROUND(AVG(sentiment_score), 4)          AS avg_sentiment,
     SUM(CASE WHEN alert_triggered THEN 1 ELSE 0 END) AS alerts_triggered
-FROM gold.sec_filings_enriched
+FROM sec_pipeline_catalog.gold.sec_filings_enriched
 WHERE filed_date >= DATE_SUB(CURRENT_DATE(), 30)
 GROUP BY filed_date, filing_type
 ORDER BY filed_date DESC, filing_count DESC;
@@ -122,7 +122,7 @@ SELECT
     critical_alerts,
     ROUND(avg_sentiment, 4)                 AS avg_sentiment,
     ROUND(total_alerts / total_filings, 4)  AS alert_rate_per_filing
-FROM gold.company_sentiment_summary
+FROM sec_pipeline_catalog.gold.company_sentiment_summary
 WHERE total_filings > 0
 ORDER BY total_alerts DESC, critical_alerts DESC
 LIMIT 25;
@@ -140,6 +140,6 @@ SELECT
     COUNT(*)                                            AS filing_count,
     ROUND(COUNT(*) * 100.0 / SUM(COUNT(*)) OVER (), 2) AS percentage,
     ROUND(AVG(sentiment_score), 4)                      AS avg_confidence_score
-FROM gold.sec_filings_enriched
+FROM sec_pipeline_catalog.gold.sec_filings_enriched
 GROUP BY sentiment_label
 ORDER BY filing_count DESC;
