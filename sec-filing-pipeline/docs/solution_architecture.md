@@ -1,341 +1,168 @@
-# Solution Architecture — SEC Filing Intelligence Pipeline
+# Solution Architecture
 
 ## Overview
 
-This pipeline is built around one core requirement: a compliance analyst or
-researcher needs to know about a significant SEC filing within sixty seconds
-of it being published. Everything in this architecture exists to serve that
-requirement.
+The SEC Filing Intelligence Pipeline is a real-time data engineering system that monitors SEC EDGAR for new public company filings, processes them through a Medallion Architecture, enriches them with NLP-based sentiment analysis, and surfaces anomaly alerts to compliance analysts via a Databricks SQL dashboard.
 
-The system has five layers. Each layer has one job. They are loosely coupled,
-meaning if one layer has a problem, the others keep running.
-
-```
-Layer 1   Ingestion        SEC EDGAR API -> Kafka Producer
-Layer 2   Streaming        Kafka -> Spark Structured Streaming
-Layer 3   Enrichment       FinBERT NLP Sentiment + Anomaly Detection
-Layer 4   Storage          Delta Lake on Azure (Bronze, Silver, Gold)
-Layer 5   Visualization    Databricks Dashboard
-```
+The pipeline runs in two modes. Local development uses Docker-based Kafka and local Delta Lake files on disk. Production runs on Azure with Databricks managed compute, ADLS Gen2 storage, and Unity Catalog governance.
 
 ---
 
-## Layer 1: Ingestion
-
-### What It Does
-
-A Python producer polls the SEC EDGAR Full Text Search API at regular intervals.
-When a new filing appears, the producer publishes an event to a Kafka topic
-called `sec-filings-raw`. That event contains the filing metadata: company name,
-ticker, filing type, date, and the URL to the full document.
-
-### Why Kafka and Not Direct Processing
-
-The simplest approach would be to poll the API and immediately process each
-filing. The problem with that approach is reliability.
-
-If the processing layer is slow or temporarily down, filings pile up with
-nowhere to go. Events get missed. There is no way to replay them.
-
-Kafka acts as a durable buffer. It holds every event until the consumer
-confirms it was processed successfully. If Spark goes down at 2am and comes
-back at 3am, it picks up exactly where it left off. Nothing is lost.
-
-That guarantee is not optional in a financial data system.
-
-### Why Not AWS SQS or Azure Service Bus
-
-Kafka was chosen over managed queue services for two reasons.
-
-First, Kafka retains messages for a configurable period even after they are
-consumed. This means the pipeline can replay historical filings for testing,
-backfilling, or debugging without hitting the EDGAR API again.
-
-Second, Kafka integrates natively with Spark Structured Streaming through the
-built-in Kafka source connector. The code is cleaner and the throughput is
-significantly higher than polling a message queue.
-
-### Technology
-
-```
-Language        Python 3.11
-Library         confluent-kafka
-Topic           sec-filings-raw
-Partitions      3
-Retention       7 days
-```
-
----
-
-## Layer 2: Streaming
-
-### What It Does
-
-A Spark Structured Streaming job consumes events from the `sec-filings-raw`
-Kafka topic. For each event it fetches the full filing document from the EDGAR
-URL, parses the raw XML, and extracts structured fields.
-
-Fields extracted at this stage:
-
-```
-company_name        string
-ticker              string
-filing_type         string     10-K, 10-Q, 8-K
-filed_date          timestamp
-period_of_report    date
-filing_url          string
-raw_text            string     full document text, cleaned
-word_count          integer
-```
-
-### Why Spark Structured Streaming and Not Flink or Kinesis
-
-Spark was chosen because the rest of the storage layer uses Delta Lake, which
-has native first-class support in Spark. Writing from a Spark stream directly
-to Delta Lake requires no additional connectors or custom serializers.
-
-Flink is a valid alternative with lower latency at extreme scale. For this
-pipeline processing hundreds of filings per day rather than millions, Spark
-is the right choice. It is also the technology most data engineering teams
-at mid-to-large companies already run.
-
-Kinesis Data Analytics was ruled out because it locks the pipeline into AWS.
-This pipeline runs on Azure.
-
-### Checkpointing
-
-Spark checkpointing is enabled on Azure Blob Storage. This means if the
-Spark job restarts, it resumes from the last committed offset in Kafka. No
-duplicate processing. No missed events.
-
-### Technology
-
-```
-Engine          Apache Spark 3.5
-Mode            Structured Streaming
-Trigger         ProcessingTime 30 seconds
-Checkpoint      Azure Blob Storage
-Output          Delta Lake Bronze layer
-```
-
----
-
-## Layer 3: Enrichment
-
-### What It Does
-
-After the raw text is extracted, two enrichment jobs run on the Silver layer.
-
-The first is sentiment analysis using FinBERT. The model reads the filing text
-and assigns a sentiment score: positive, negative, or neutral. It also produces
-a confidence score between 0 and 1.
-
-The second is anomaly detection. A set of rule-based flags are applied to each
-filing looking for patterns that historically precede significant market events.
-
-Anomaly flags applied:
-
-```
-sudden_ceo_change           CEO or CFO named in 8-K resignation context
-earnings_restatement        Keywords indicating prior earnings were incorrect
-going_concern               Auditor language questioning business continuity
-legal_proceedings           Significant new litigation disclosed
-sentiment_drop              Sentiment score 40% lower than company 3-month average
-options_volume_spike        Unusual options activity in 48 hours before filing
-```
-
-### Why FinBERT and Not VADER or TextBlob
-
-VADER and TextBlob are general purpose sentiment models. They were trained on
-social media and news text. Financial and legal language is structurally
-different. A sentence like "the company faces material uncertainty regarding
-future operations" is strongly negative in financial context. General models
-score it as neutral.
-
-FinBERT was trained specifically on financial documents including SEC filings,
-earnings call transcripts, and financial news. Its accuracy on this type of
-text is significantly higher. Independent benchmarks show F1 scores above 0.85
-on financial sentiment tasks compared to 0.65 for VADER on the same datasets.
-
-### Technology
-
-```
-Model           ProsusAI/finbert (HuggingFace)
-Framework       PyTorch + Transformers
-Batch Size      16 documents per inference call
-Anomaly Logic   Rule-based Python, configurable thresholds
-```
-
----
-
-## Layer 4: Storage
-
-### What It Does
-
-All data is stored in Delta Lake on Azure Data Lake Storage Gen2. The storage
-follows the medallion architecture with three layers.
-
-### Bronze Layer
-
-Raw filings exactly as received from EDGAR. No transformations. No cleaning.
-This is the permanent record of what was ingested and when. If any downstream
-processing has a bug, the data can always be reprocessed from Bronze.
-
-Schema:
-
-```
-ingestion_timestamp     timestamp
-kafka_offset            long
-filing_url              string
-raw_payload             string     full XML document
-source                  string     edgar_api
-```
-
-### Silver Layer
-
-Cleaned, parsed, and structured filings. Bad records are quarantined to a
-separate error table. This is the layer Spark reads for enrichment.
-
-Schema:
-
-```
-filing_id               string     generated UUID
-company_name            string
-ticker                  string
-filing_type             string
-filed_date              timestamp
-period_of_report        date
-raw_text                string
-word_count              integer
-processed_timestamp     timestamp
-```
-
-### Gold Layer
-
-Business-ready data. Sentiment scores, anomaly flags, and aggregated company
-metrics. This is what the Databricks dashboard reads.
-
-Schema:
-
-```
-filing_id               string
-company_name            string
-ticker                  string
-filing_type             string
-filed_date              timestamp
-sentiment_label         string     positive, negative, neutral
-sentiment_score         float
-anomaly_flags           array
-anomaly_count           integer
-company_avg_sentiment   float      rolling 90-day average
-sentiment_delta         float      deviation from company average
-alert_triggered         boolean
-```
-
-### Why Delta Lake and Not Plain Parquet
-
-Plain Parquet files on Azure Blob Storage would be cheaper and simpler. Delta
-Lake adds three things that matter for this use case.
-
-ACID transactions mean that if a Spark job fails mid-write, the table is not
-left in a corrupt state. This is critical when processing financial data where
-partial records are worse than no records.
-
-Time travel means every version of every table is queryable. If the anomaly
-detection logic is updated, historical filings can be rescored without touching
-the Bronze or Silver layers.
-
-Schema enforcement prevents bad data from silently corrupting downstream tables.
-A filing missing a required field fails loudly at the Silver write, not silently
-at the Gold read.
-
-### Technology
-
-```
-Storage         Azure Data Lake Storage Gen2
-Format          Delta Lake
-Compute         Azure Databricks
-Catalog         Unity Catalog for table governance
-```
-
----
-
-## Layer 5: Visualization
-
-### What It Does
-
-A Databricks dashboard surfaces the Gold layer data to end users. Three views
-are available.
-
-The live feed shows every filing processed in the last 24 hours with sentiment
-label and anomaly flag status.
-
-The company sentiment trend shows a rolling 90-day sentiment history for any
-company, with filing events marked on the timeline.
-
-The anomaly alert panel shows all filings that triggered one or more anomaly
-flags, sorted by severity and recency.
-
-### Technology
-
-```
-Platform        Databricks SQL
-Dashboard       Databricks built-in dashboard
-Refresh         Every 60 seconds
-Access          Role-based via Unity Catalog
-```
-
----
-
-## End-to-End Data Flow
+## Architecture Diagram
 
 ```
 SEC EDGAR API
-     |
-     | new filing published
-     v
-Kafka Producer (Python)
-     |
-     | event published to sec-filings-raw topic
-     v
-Kafka Topic
-     |
-     | consumed every 30 seconds
-     v
-Spark Structured Streaming
-     |
-     | raw payload written immediately
-     v
-Delta Lake Bronze
-     |
-     | parsed and cleaned
-     v
-Delta Lake Silver
-     |
-     | FinBERT scoring + anomaly detection
-     v
-Delta Lake Gold
-     |
-     | queried every 60 seconds
-     v
-Databricks Dashboard
-     |
-     v
-Compliance Analyst sees alert
-Total time from filing to alert: under 60 seconds
+(efts.sec.gov + data.sec.gov)
+         |
+         | HTTP polling every 30 seconds
+         v
+edgar_producer.py
+Python process running locally or on VM
+Fetches filing metadata and document URLs
+Publishes JSON events to Kafka
+         |
+         | Kafka topic: sec-filings-raw
+         | 3 partitions, replication factor 1
+         v
+Apache Kafka
+Docker container (local) or Azure Event Hubs (production)
+Durable message retention, offset-based replay
+         |
+         | Spark Structured Streaming reads from Kafka
+         | foreachBatch micro-batches every 30 seconds
+         v
+bronze_writer.py
+Fetches raw document text from SEC Archives
+Writes raw records to Delta Lake Bronze
+         |
+         v
+BRONZE LAYER
+sec_pipeline_catalog.bronze.sec_filings_raw
+Delta Lake on ADLS Gen2
+abfss://sec-data@secpipelinestorage.dfs.core.windows.net/bronze.sec_filings_raw
+         |
+         | PySpark batch job
+         | Schema validation and quarantine routing
+         v
+silver_transformer.py
+Parses filing metadata
+Validates required fields
+Quarantines invalid records
+         |
+         v
+SILVER LAYER
+sec_pipeline_catalog.silver.sec_filings_parsed
+sec_pipeline_catalog.silver.sec_filings_quarantine
+Delta Lake on ADLS Gen2
+         |
+         | FinBERT NLP via HuggingFace Inference API
+         | Rule-based anomaly detection
+         v
+gold_enricher.py
+Scores each filing with FinBERT sentiment model
+Detects anomaly flags from filing text
+Assigns alert severity
+Computes company sentiment summary
+         |
+         v
+GOLD LAYER
+sec_pipeline_catalog.gold.sec_filings_enriched
+sec_pipeline_catalog.gold.company_sentiment_summary
+Delta Lake on ADLS Gen2
+         |
+         | Databricks SQL Warehouse (Serverless)
+         v
+DASHBOARD
+6 analytical queries
+Live filing feed, anomaly alerts, sentiment trends
+Filing volume, top risk companies, sentiment distribution
 ```
 
 ---
 
-## What Was Not Built and Why
+## Azure Infrastructure
 
-A machine learning model for anomaly detection was considered but ruled out
-for V1. Rule-based anomaly detection is explainable, which matters in a
-compliance context. If a compliance analyst asks why a filing was flagged,
-the answer needs to be specific and auditable, not "the model scored it 0.73."
-A trained model will be evaluated for V2 once a labeled dataset of confirmed
-anomalies is accumulated from V1 production data.
+```
+Subscription         Azure for Students
+Resource Group       sec-pipeline-rg (East US)
 
-A REST API layer for external consumers was also considered. It was deferred
-to V2 in favor of getting the core pipeline stable first. The Gold layer
-Delta tables serve as the data contract for now.
+Storage
+  Account            secpipelinestorage
+  Type               ADLS Gen2 (hierarchical namespace enabled)
+  Redundancy         LRS
+  Container          sec-data
+
+Databricks
+  Workspace          sec-pipeline-databricks (East US)
+  Tier               Premium Trial (14-day free DBUs)
+  Compute            Serverless SQL Warehouse
+
+Identity and Access
+  Access Connector   sec_pipeline_access_connector
+  Credential         sec_pipeline_credential (Managed Identity)
+  External Location  sec_pipeline_external
+  URL                abfss://sec-data@secpipelinestorage.dfs.core.windows.net/
+
+Unity Catalog
+  Catalog            sec_pipeline_catalog
+  Storage location   abfss://sec-data@secpipelinestorage.dfs.core.windows.net/
+  Schemas            bronze, silver, gold
+  Tables             bronze.sec_filings_raw
+                     silver.sec_filings_parsed
+                     silver.sec_filings_quarantine
+                     gold.sec_filings_enriched
+                     gold.company_sentiment_summary
+```
+
+---
+
+## Technology Decisions
+
+**Kafka over direct API polling** — Kafka decouples the producer from the consumers. If the bronze writer is down, events are retained in Kafka and replayed on restart. This guarantees no filing is lost even if downstream processing fails. The checkpoint mechanism ensures exactly-once delivery semantics.
+
+**Delta Lake over raw Parquet** — Delta Lake adds ACID transactions, time travel, and schema enforcement on top of Parquet. If a bad batch corrupts a table, we can roll back to a previous version. Schema evolution is handled automatically. Compaction and Z-ordering are available for query optimization.
+
+**Medallion Architecture** — Separating Bronze, Silver, and Gold gives each layer a clear contract. Bronze is a faithful copy of the source. Silver is validated and structured. Gold is business-ready. Each layer can be reprocessed independently if logic changes. Quarantine in Silver means bad data never reaches Gold.
+
+**FinBERT over general-purpose sentiment models** — FinBERT is trained on financial text from Reuters and analyst reports. It understands phrases like going concern, material weakness, and restatement in their financial context. General models like VADER score these as neutral; FinBERT scores them correctly as negative signals.
+
+**Rule-based anomaly detection** — Pattern matching on known risk phrases is auditable. A compliance analyst can see exactly which words triggered the flag. Machine learning anomaly detection would require labeled training data and a model retraining pipeline. Rule-based is explainable, maintainable, and sufficient for the current scope.
+
+**Unity Catalog with custom managed location** — Instead of using Databricks-managed default storage, we configured a custom ADLS Gen2 path as the catalog storage location. This means the underlying Delta Lake files are visible and accessible outside of Databricks. The team retains full ownership of the data independent of the Databricks workspace.
+
+**Serverless SQL Warehouse** — No cluster management. Starts automatically when a query runs. Stops when idle. Charged only for query execution time. For a dashboard with intermittent usage this is significantly cheaper than an always-on cluster.
+
+---
+
+## Data Flow Latency
+
+```
+Filing submitted to EDGAR
+         |
+         | 0 to 30 seconds (Kafka poll interval)
+         v
+Event published to Kafka
+         |
+         | 0 to 30 seconds (Spark micro-batch interval)
+         v
+Written to Bronze
+         |
+         | Manual trigger in current implementation
+         | Airflow schedule planned for production
+         v
+Written to Silver
+         |
+         v
+Written to Gold with sentiment scores
+         |
+         v
+Available in dashboard
+
+Total end-to-end latency target: under 5 minutes filing to dashboard
+```
+
+---
+
+## Security
+
+The pipeline uses Azure Managed Identity for all storage access. No credentials or connection strings are stored in code. The Access Connector for Azure Databricks authenticates to ADLS Gen2 using its system-assigned managed identity, which is granted the Storage Blob Data Contributor role on the storage account. The HuggingFace API token is passed as an environment variable and never committed to the repository.
