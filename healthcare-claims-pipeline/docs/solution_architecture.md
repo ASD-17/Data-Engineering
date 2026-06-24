@@ -2,18 +2,18 @@
 
 ## Overview
 
-The Healthcare Claims Anomaly Detection Pipeline is a batch data engineering system that ingests Medicare claims data from Kaggle, processes it through a Medallion Architecture on Delta Lake, applies statistical anomaly detection to identify fraudulent providers and suspicious billing patterns, and surfaces high risk cases to investigators through a Databricks SQL dashboard.
+The Healthcare Claims Anomaly Detection Pipeline is a batch data engineering system that ingests Medicare claims data from Kaggle, processes it through a Medallion Architecture on Delta Lake, applies statistical and rule based anomaly detection to identify fraudulent providers, and surfaces explainable fraud alerts to investigators through a Databricks SQL dashboard.
 
-Healthcare claims are submitted in bulk by providers at the end of each billing cycle. Processing them in scheduled batches mirrors how real world Medicare fraud detection systems operate at CMS.
+Healthcare claims are submitted in bulk by providers at the end of each billing cycle. Processing them in scheduled batches mirrors how real world Medicare fraud detection systems operate at CMS. The pipeline is designed to be simple enough to understand and complex enough to demonstrate production grade data engineering skills.
 
 ## Architecture Diagram
 
 ```
 Kaggle Dataset
 Medicare Provider Fraud Detection
-Inpatient, Outpatient, Beneficiary, Provider CSVs
+Inpatient, Outpatient, Beneficiary, Provider Label CSVs
          |
-         | claims_loader.py reads CSV files into Spark DataFrames
+         | claims_loader.py reads CSVs into Spark DataFrames
          v
 BRONZE LAYER
 healthcare_catalog.bronze.inpatient_claims
@@ -21,43 +21,58 @@ healthcare_catalog.bronze.outpatient_claims
 healthcare_catalog.bronze.beneficiary_data
 healthcare_catalog.bronze.provider_labels
 Delta Lake on ADLS Gen2
-Raw data exactly as received from source
+Raw data exactly as received
          |
-         | silver_transformer.py cleans, joins, and structures
+         | silver_transformer.py cleans, joins, engineers features
          v
 SILVER LAYER
 healthcare_catalog.silver.claims_enriched
-healthcare_catalog.silver.provider_profiles
+healthcare_catalog.silver.provider_features
 Delta Lake on ADLS Gen2
-Validated, joined, and structured claims data
+Validated, joined, and feature engineered data
          |
-         | fraud_detector.py applies anomaly detection
+         | fraud_detector.py runs rule based and ML detection
+         v
+FRAUD DETECTION
+Rule Based: duplicate claims, deceased billing, upcoding, volume
+ML: Isolation Forest anomaly scoring
+Validation: Precision, Recall, F1, ROC-AUC against ground truth labels
+Explainability: human readable reasons for every alert
+         |
          v
 GOLD LAYER
-healthcare_catalog.gold.fraud_alerts
 healthcare_catalog.gold.provider_risk_scores
+healthcare_catalog.gold.fraud_alerts
+healthcare_catalog.gold.provider_peer_benchmark
+healthcare_catalog.gold.investigator_work_queue
 Delta Lake on ADLS Gen2
-Scored providers and ranked fraud alerts
          |
-         | Databricks SQL Warehouse
+         | Databricks SQL Warehouse (Serverless)
          v
 DASHBOARD
-Provider risk ranking, alert panel, billing anomalies
+Executive summary, provider risk ranking, geographic fraud map
+investigator queue with explainable alerts
 ```
 
 ## Technology Decisions
 
-**Spark batch over streaming** — Healthcare claims arrive in bulk. Providers submit monthly or weekly batches to CMS. Processing each file as it arrives in a scheduled batch job matches the cadence of the real world problem. Streaming would add complexity without adding value here.
+**Spark batch over streaming** Healthcare claims arrive in bulk. Providers submit monthly or weekly batches to CMS. Processing each file as it arrives in a scheduled batch job matches the cadence of the real world problem.
 
-**Four Bronze tables instead of one** — The Kaggle dataset has four separate CSV files representing different entities. Inpatient claims, outpatient claims, beneficiary demographics, and provider fraud labels each have their own schema and update cadence. Keeping them separate in Bronze preserves the raw source structure and makes debugging easier when something goes wrong upstream.
+**Five Bronze tables** The Kaggle dataset has four source files representing different entities. Each is kept as its own Bronze table to preserve source fidelity and make reprocessing easier if downstream logic changes.
 
-**Joining at Silver** — The four Bronze tables are joined in the Silver layer to create a unified claims view per provider. This is where the analytical value is created. A claim only becomes meaningful when you know the beneficiary age, the provider specialty, and whether the provider is labeled fraudulent in the training data.
+**Feature engineering at Silver** The Silver provider features table computes behavioral metrics like duplicate claim ratio, weekend claim ratio, and reimbursement per patient. These derived features are what make fraud detectable. Raw claim data alone is not enough.
 
-**Rule based plus statistical anomaly detection** — Two detection approaches run in parallel. Rule based detection catches obvious fraud patterns like impossible claim volumes or invalid diagnosis codes. Statistical detection uses Isolation Forest to find providers whose billing behavior is statistically unusual relative to their peer group. Together they catch both known fraud patterns and novel ones.
+**Rule based plus Isolation Forest** Two detection approaches run in parallel. Rule based detection catches known fraud patterns that domain experts have identified. Isolation Forest finds statistical outliers that no explicit rule covers. Together they catch both known and novel fraud patterns.
 
-**Delta Lake on ADLS Gen2** — Delta Lake provides ACID transactions, time travel, and schema enforcement on top of Parquet files stored in Azure Data Lake Storage Gen2. If a processing job corrupts a table, time travel allows rollback to a previous version without reprocessing the source data.
+**Explainability over black box scoring** Every provider alert includes human readable reasons explaining which specific behaviors triggered the flag and how far the provider deviates from peers. A risk score of 92 means nothing to an investigator. Knowing that a provider bills 4.2 times more than peers and has duplicate claims gives them a starting point.
 
-**Unity Catalog** — All tables are registered in Databricks Unity Catalog with a custom managed storage location pointing to ADLS Gen2. This gives full data governance, lineage tracking, and the ability to inspect the underlying Delta files directly in the storage account.
+**Validation against ground truth** Because the Kaggle dataset includes fraud labels, the pipeline computes precision, recall, F1, and ROC-AUC scores. This proves the detection logic works and gives a baseline for future improvement.
+
+**Delta Lake OPTIMIZE and ZORDER** Gold tables are optimized and Z-ordered by provider_id. Most dashboard queries filter by provider so Z-ordering reduces the amount of data scanned per query.
+
+**Unity Catalog with custom managed location** All tables are registered in Databricks Unity Catalog backed by a custom ADLS Gen2 storage location. This gives full governance, lineage tracking, and the ability to inspect the underlying Delta files directly.
+
+**Databricks Jobs with Lakeflow Connect** On Azure Databricks the pipeline runs as a four task job on Serverless compute. Lakeflow Connect monitors the ADLS container for new CSV files and triggers the job automatically when new data arrives.
 
 ## Azure Infrastructure
 
@@ -65,22 +80,10 @@ Provider risk ranking, alert panel, billing anomalies
 Resource Group       healthcare-pipeline-rg (East US)
 Storage Account      healthcarepipelinestorage (ADLS Gen2)
 Container            healthcare-data
-Databricks Workspace healthcare-pipeline-databricks
+Databricks Workspace healthcare-pipeline-databricks (Premium)
 Catalog              healthcare_catalog
 Schemas              bronze, silver, gold
-```
-
-## Data Flow
-
-```
-Step 1   Download Kaggle CSVs to data/raw/ locally
-Step 2   claims_loader.py reads CSVs into Spark DataFrames
-Step 3   bronze_writer.py writes four Bronze Delta tables
-Step 4   silver_transformer.py joins and cleans into Silver
-Step 5   fraud_detector.py scores providers and generates alerts
-Step 6   Upload Delta files to ADLS Gen2
-Step 7   Register tables in Unity Catalog
-Step 8   Run dashboard queries in Databricks SQL
+Compute              Serverless SQL Warehouse
 ```
 
 ## Security

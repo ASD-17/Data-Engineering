@@ -1,0 +1,25 @@
+# Spark
+pyspark==4.1.1
+delta-spark==4.2.0
+
+# ML
+scikit-learn==1.4.0
+numpy==1.26.4
+pandas==2.2.0
+
+# Azure
+azure-storage-file-datalake==12.14.0
+azure-identity==1.15.0
+
+# Data
+pyarrow==15.0.0
+
+# Config
+pyyaml==6.0.1
+
+# Logging
+loguru==0.7.2
+
+# Testing
+pytest==8.0.0
+pytest-mock==3.12.0

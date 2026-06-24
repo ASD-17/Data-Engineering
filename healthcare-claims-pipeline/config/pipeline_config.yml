@@ -1,0 +1,155 @@
+pipeline:
+  name: healthcare-claims-anomaly-detection
+  version: 1.0.0
+
+data:
+  raw_path: data/raw
+  delta_path: data/delta
+  inpatient_file: Train_Inpatientdata-1542865627584.csv
+  outpatient_file: Train_Outpatientdata-1542865627584.csv
+  beneficiary_file: Train_Beneficiarydata-1542865627584.csv
+  provider_labels_file: Train-1542865627584.csv
+
+spark:
+  app_name: healthcare-claims-pipeline
+  master: local[*]
+  shuffle_partitions: 8
+  log_level: WARN
+
+bronze:
+  inpatient_table: bronze.inpatient_claims
+  outpatient_table: bronze.outpatient_claims
+  beneficiary_table: bronze.beneficiary_data
+  provider_labels_table: bronze.provider_labels
+  write_mode: overwrite
+
+silver:
+  claims_enriched_table: silver.claims_enriched
+  provider_features_table: silver.provider_features
+  write_mode: overwrite
+  min_claim_amount: 0.0
+  max_claim_duration_days: 365
+
+anomaly_detection:
+  isolation_forest_contamination: 0.1
+  isolation_forest_n_estimators: 100
+  isolation_forest_random_state: 42
+  high_claim_volume_threshold: 100
+  high_reimbursement_std_threshold: 3.0
+  duplicate_claim_ratio_threshold: 0.05
+  weekend_claim_ratio_threshold: 0.30
+  high_cost_procedure_ratio_threshold: 0.50
+  critical_risk_score_threshold: 0.7
+  high_risk_score_threshold: 0.5
+  medium_risk_score_threshold: 0.3
+
+gold:
+  provider_risk_scores_table: gold.provider_risk_scores
+  fraud_alerts_table: gold.fraud_alerts
+  provider_peer_benchmark_table: gold.provider_peer_benchmark
+  investigator_work_queue_table: gold.investigator_work_queue
+  write_mode: overwrite
+
+azure:
+  storage_account: healthcarepipelinestorage
+  container_name: healthcare-data
+  delta_base_path: abfss://healthcare-data@healthcarepipelinestorage.dfs.core.windows.net
+
+unity_catalog:
+  catalog: healthcare_catalog
+  bronze_schema: bronze
+  silver_schema: silver
+  gold_schema: gold
+
+columns:
+  inpatient:
+    - BeneID
+    - ClaimID
+    - ClaimStartDt
+    - ClaimEndDt
+    - Provider
+    - InscClaimAmtReimbursed
+    - AttendingPhysician
+    - OperatingPhysician
+    - OtherPhysician
+    - AdmissionDt
+    - ClmAdmitDiagnosisCode
+    - DeductibleAmtPaid
+    - DischargeDt
+    - DiagnosisGroupCode
+    - ClmDiagnosisCode_1
+    - ClmDiagnosisCode_2
+    - ClmDiagnosisCode_3
+    - ClmDiagnosisCode_4
+    - ClmDiagnosisCode_5
+    - ClmDiagnosisCode_6
+    - ClmDiagnosisCode_7
+    - ClmDiagnosisCode_8
+    - ClmDiagnosisCode_9
+    - ClmDiagnosisCode_10
+    - ClmProcedureCode_1
+    - ClmProcedureCode_2
+    - ClmProcedureCode_3
+    - ClmProcedureCode_4
+    - ClmProcedureCode_5
+    - ClmProcedureCode_6
+
+  outpatient:
+    - BeneID
+    - ClaimID
+    - ClaimStartDt
+    - ClaimEndDt
+    - Provider
+    - InscClaimAmtReimbursed
+    - AttendingPhysician
+    - OperatingPhysician
+    - OtherPhysician
+    - ClmDiagnosisCode_1
+    - ClmDiagnosisCode_2
+    - ClmDiagnosisCode_3
+    - ClmDiagnosisCode_4
+    - ClmDiagnosisCode_5
+    - ClmDiagnosisCode_6
+    - ClmDiagnosisCode_7
+    - ClmDiagnosisCode_8
+    - ClmDiagnosisCode_9
+    - ClmDiagnosisCode_10
+    - ClmProcedureCode_1
+    - ClmProcedureCode_2
+    - ClmProcedureCode_3
+    - ClmProcedureCode_4
+    - ClmProcedureCode_5
+    - ClmProcedureCode_6
+    - DeductibleAmtPaid
+    - ClmAdmitDiagnosisCode
+
+  beneficiary:
+    - BeneID
+    - DOB
+    - DOD
+    - Gender
+    - Race
+    - RenalDiseaseIndicator
+    - State
+    - County
+    - NoOfMonths_PartACov
+    - NoOfMonths_PartBCov
+    - ChronicCond_Alzheimer
+    - ChronicCond_Heartfailure
+    - ChronicCond_KidneyDisease
+    - ChronicCond_Cancer
+    - ChronicCond_ObstrPulmonary
+    - ChronicCond_Depression
+    - ChronicCond_Diabetes
+    - ChronicCond_IschemicHeart
+    - ChronicCond_Osteoporasis
+    - ChronicCond_rheumatoidarthritis
+    - ChronicCond_stroke
+    - IPAnnualReimbursementAmt
+    - IPAnnualDeductibleAmt
+    - OPAnnualReimbursementAmt
+    - OPAnnualDeductibleAmt
+
+  provider_labels:
+    - Provider
+    - PotentialFraud
