@@ -51,9 +51,9 @@ gold:
   write_mode: overwrite
 
 azure:
-  storage_account: healthcarepipelinestorage
+  storage_account: healthpipelinestorage
   container_name: healthcare-data
-  delta_base_path: abfss://healthcare-data@healthcarepipelinestorage.dfs.core.windows.net
+  delta_base_path: abfss://healthcare-data@healthpipelinestorage.dfs.core.windows.net
 
 unity_catalog:
   catalog: healthcare_catalog
