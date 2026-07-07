@@ -1,0 +1,9 @@
+data/raw/
+data/delta/
+**/__pycache__/
+**/*.pyc
+.pytest_cache/
+.DS_Store
+dbt/banking_dw/target/
+dbt/banking_dw/logs/
+dbt/banking_dw/.user.yml
